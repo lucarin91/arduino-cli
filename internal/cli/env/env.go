@@ -30,7 +30,7 @@ import (
 func NewCommand(srv rpc.ArduinoCoreServiceServer, settings *rpc.Configuration) *cobra.Command {
 	return &cobra.Command{
 		Use:   "env [SHELL]",
-		Short: "Set environment variables for the Arduino CLI",
+		Short: "Set PATH environment variable to include Arduino CLI tools",
 		Run: func(cmd *cobra.Command, args []string) {
 			shell := "bash"
 			if len(args) == 1 {
