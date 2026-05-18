@@ -20,10 +20,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/arduino/arduino-cli/internal/cli/feedback"
-	rpc "github.com/arduino/arduino-cli/rpc/cc/arduino/cli/commands/v1"
 	"github.com/spf13/cobra"
 	"go.bug.st/f"
+
+	"github.com/arduino/arduino-cli/internal/cli/feedback"
+	rpc "github.com/arduino/arduino-cli/rpc/cc/arduino/cli/commands/v1"
 )
 
 // NewCommand creates a new `env` command
