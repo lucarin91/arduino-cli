@@ -30,6 +30,7 @@ import (
 	"github.com/arduino/arduino-cli/internal/cli/config"
 	"github.com/arduino/arduino-cli/internal/cli/core"
 	"github.com/arduino/arduino-cli/internal/cli/daemon"
+	"github.com/arduino/arduino-cli/internal/cli/env"
 	"github.com/arduino/arduino-cli/internal/cli/debug"
 	"github.com/arduino/arduino-cli/internal/cli/feedback"
 	"github.com/arduino/arduino-cli/internal/cli/generatedocs"
@@ -151,6 +152,7 @@ func NewCommand(srv rpc.ArduinoCoreServiceServer) *cobra.Command {
 	cmd.AddCommand(config.NewCommand(srv, settings))
 	cmd.AddCommand(core.NewCommand(srv))
 	cmd.AddCommand(daemon.NewCommand(srv, settings))
+	cmd.AddCommand(env.NewCommand(srv, settings))
 	cmd.AddCommand(generatedocs.NewCommand())
 	cmd.AddCommand(lib.NewCommand(srv, settings))
 	cmd.AddCommand(monitor.NewCommand(srv))
