@@ -128,14 +128,23 @@ func (s *arduinoCoreServerImpl) LibraryList(ctx context.Context, req *rpc.Librar
 // If all is true, it returns all the libraries (including the libraries builtin in the
 // platforms), otherwise only the user installed libraries.
 func listLibraries(lme *librariesmanager.Explorer, li *librariesindex.Index, updatable bool, all bool) []*installedLib {
-	res := []*installedLib{}
+	installed := []*libraries.Library{}
 	for _, lib := range lme.FindAllInstalled() {
 		if !all {
 			if lib.Location != libraries.User {
 				continue
 			}
 		}
-		available := li.FindLibraryUpdate(lib)
+		installed = append(installed, lib)
+	}
+
+	// Resolve the available updates for all the installed libraries with a
+	// single scan of the index.
+	updates := li.FindLibraryUpdates(installed)
+
+	res := []*installedLib{}
+	for _, lib := range installed {
+		available := updates[lib]
 		if updatable && available == nil {
 			continue
 		}

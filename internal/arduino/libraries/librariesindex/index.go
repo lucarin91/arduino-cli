@@ -16,6 +16,7 @@
 package librariesindex
 
 import (
+	"iter"
 	"sort"
 	"strings"
 
@@ -23,16 +24,19 @@ import (
 	"github.com/arduino/arduino-cli/internal/arduino/libraries"
 	"github.com/arduino/arduino-cli/internal/arduino/resources"
 	rpc "github.com/arduino/arduino-cli/rpc/cc/arduino/cli/commands/v1"
+	"github.com/arduino/go-paths-helper"
 	semver "go.bug.st/relaxed-semver"
 )
 
-// Index represents the list of libraries available for download
+// Index represents the list of libraries available for download. The library
+// data is not kept in memory: it is streamed from the backing
+// library_index.json file on demand by the methods below.
 type Index struct {
-	Libraries map[string]*Library
+	indexFile *paths.Path
 }
 
 // EmptyIndex is an empty library index
-var EmptyIndex = &Index{Libraries: map[string]*Library{}}
+var EmptyIndex = &Index{}
 
 // Library is a library available for download
 type Library struct {
@@ -119,11 +123,86 @@ func (r *Release) String() string {
 	return r.Library.Name + "@" + r.Version.String()
 }
 
+// releases streams the releases in the backing index file. It yields nothing on
+// an empty index.
+func (idx *Index) releases() iter.Seq[*indexRelease] {
+	if idx == nil || idx.indexFile == nil {
+		return func(yield func(*indexRelease) bool) {}
+	}
+	return scanIndexFile(idx.indexFile)
+}
+
+// findLibraries collects the requested libraries (by name), with all their
+// releases, in a single scan of the index file.
+func (idx *Index) findLibraries(names map[string]bool) map[string]*Library {
+	libs := map[string]*Library{}
+	if len(names) == 0 {
+		return libs
+	}
+	for r := range idx.releases() {
+		if !names[r.Name] {
+			continue
+		}
+		lib := libs[r.Name]
+		if lib == nil {
+			lib = &Library{Name: r.Name, Releases: map[semver.NormalizedString]*Release{}}
+			libs[r.Name] = lib
+		}
+		r.extractReleaseIn(lib)
+	}
+	return libs
+}
+
+// findLibrary collects a single library (with all its releases) from the index.
+func (idx *Index) findLibrary(name string) *Library {
+	return idx.findLibraries(map[string]bool{name: true})[name]
+}
+
+// FindIndexedLibraries returns the indexed libraries matching the given names,
+// loaded in a single scan of the index file.
+func (idx *Index) FindIndexedLibraries(names []string) map[string]*Library {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return idx.findLibraries(set)
+}
+
+// Libraries streams the index, yielding each library with all its releases
+// populated. Only one library at a time is held in memory. This relies on the
+// index grouping all the releases of a library contiguously (as produced by the
+// Arduino library index generator).
+func (idx *Index) Libraries() iter.Seq[*Library] {
+	return func(yield func(*Library) bool) {
+		var current *Library
+		for r := range idx.releases() {
+			if current != nil && current.Name != r.Name {
+				if !yield(current) {
+					return
+				}
+				current = nil
+			}
+			if current == nil {
+				current = &Library{Name: r.Name, Releases: map[semver.NormalizedString]*Release{}}
+			}
+			r.extractReleaseIn(current)
+		}
+		if current != nil {
+			yield(current)
+		}
+	}
+}
+
+// HasLibrary returns true if a library with the given name exists in the index.
+func (idx *Index) HasLibrary(name string) bool {
+	return idx.findLibrary(name) != nil
+}
+
 // FindRelease search a library Release in the index. Returns nil if the
 // release is not found. If the version is not specified returns the latest
 // version available.
 func (idx *Index) FindRelease(name string, version *semver.Version) (*Release, error) {
-	if library, exists := idx.Libraries[name]; exists {
+	if library := idx.findLibrary(name); library != nil {
 		if version == nil {
 			return library.Latest, nil
 		}
@@ -140,14 +219,38 @@ func (idx *Index) FindRelease(name string, version *semver.Version) (*Release, e
 // FindIndexedLibrary search an indexed library that matches the provided
 // installed library or nil if not found
 func (idx *Index) FindIndexedLibrary(lib *libraries.Library) *Library {
-	return idx.Libraries[lib.Name]
+	return idx.findLibrary(lib.Name)
 }
 
 // FindLibraryUpdate check if an installed library may be updated using
 // one of the indexed libraries. This function returns the Release to install
 // to update the library if found, otherwise nil is returned.
 func (idx *Index) FindLibraryUpdate(lib *libraries.Library) *Release {
-	indexLib := idx.FindIndexedLibrary(lib)
+	return libraryUpdate(idx.FindIndexedLibrary(lib), lib)
+}
+
+// FindLibraryUpdates checks, for each of the given installed libraries, whether
+// an update is available in the index. The lookup is performed in a single scan
+// of the index file. The returned map is keyed by the installed library and
+// only contains entries for libraries that have an available update.
+func (idx *Index) FindLibraryUpdates(libs []*libraries.Library) map[*libraries.Library]*Release {
+	names := make([]string, len(libs))
+	for i, lib := range libs {
+		names[i] = lib.Name
+	}
+	indexed := idx.FindIndexedLibraries(names)
+	updates := map[*libraries.Library]*Release{}
+	for _, lib := range libs {
+		if update := libraryUpdate(indexed[lib.Name], lib); update != nil {
+			updates[lib] = update
+		}
+	}
+	return updates
+}
+
+// libraryUpdate returns the release to update `lib` to, given its indexed
+// counterpart `indexLib` (possibly nil), or nil if no update is available.
+func libraryUpdate(indexLib *Library, lib *libraries.Library) *Release {
 	if indexLib == nil {
 		return nil
 	}
@@ -166,19 +269,53 @@ func (idx *Index) FindLibraryUpdate(lib *libraries.Library) *Release {
 func (idx *Index) ResolveDependencies(lib *Release, overrides []*Release) []*Release {
 	resolver := semver.NewResolver[*Release]()
 
-	overridden := map[string]bool{}
-	for _, override := range overrides {
-		resolver.AddRelease(override)
-		overridden[override.GetName()] = true
+	// done tracks library names already handled (added to the resolver, or
+	// deliberately excluded); frontier holds the names to load in the next scan.
+	done := map[string]bool{}
+	frontier := map[string]bool{}
+	enqueueDeps := func(deps []*Dependency) {
+		for _, dep := range deps {
+			if name := dep.GetName(); !done[name] {
+				frontier[name] = true
+			}
+		}
 	}
 
-	// Create and populate the library resolver
-	for libName, indexLib := range idx.Libraries {
-		if _, ok := overridden[libName]; ok {
-			continue
+	// Overridden libraries are provided as-is and must not be taken from the
+	// index; mark them done so they are never scanned, but still follow their
+	// dependencies.
+	for _, override := range overrides {
+		resolver.AddRelease(override)
+		done[override.GetName()] = true
+	}
+	for _, override := range overrides {
+		enqueueDeps(override.Dependencies)
+	}
+
+	// Seed the resolver with the target library. Its releases are already
+	// loaded (the caller obtained `lib` via FindRelease).
+	if lib.Library != nil {
+		done[lib.Library.Name] = true
+		for _, release := range lib.Library.Releases {
+			resolver.AddRelease(release)
+			enqueueDeps(release.Dependencies)
 		}
-		for _, indexLibRelease := range indexLib.Releases {
-			resolver.AddRelease(indexLibRelease)
+	}
+
+	// Collect the transitive dependency closure, scanning the index once per
+	// dependency-tree level. Only the libraries actually involved in the
+	// resolution are loaded into memory, instead of the whole index.
+	for len(frontier) > 0 {
+		wanted := frontier
+		frontier = map[string]bool{}
+		for name := range wanted {
+			done[name] = true
+		}
+		for _, indexLib := range idx.findLibraries(wanted) {
+			for _, release := range indexLib.Releases {
+				resolver.AddRelease(release)
+				enqueueDeps(release.Dependencies)
+			}
 		}
 	}
 

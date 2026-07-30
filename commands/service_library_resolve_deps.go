@@ -83,11 +83,29 @@ func (s *arduinoCoreServerImpl) LibraryResolveDependencies(ctx context.Context, 
 }
 
 func librariesGetAllInstalled(lme *librariesmanager.Explorer, li *librariesindex.Index) []*librariesindex.Release {
-	var overrides []*librariesindex.Release
 	libs := lme.FindAllInstalled()
 	libs = libs.FilterByVersionAndInstallLocation(nil, libraries.User)
+
+	// Load all the involved indexed libraries with a single scan of the index.
+	names := make([]string, len(libs))
+	for i, lib := range libs {
+		names[i] = lib.Name
+	}
+	indexed := li.FindIndexedLibraries(names)
+
+	var overrides []*librariesindex.Release
 	for _, lib := range libs {
-		if release, err := li.FindRelease(lib.Name, lib.Version); err == nil {
+		indexLib := indexed[lib.Name]
+		if indexLib == nil {
+			continue
+		}
+		var release *librariesindex.Release
+		if lib.Version == nil {
+			release = indexLib.Latest
+		} else if r, ok := indexLib.Releases[lib.Version.NormalizedString()]; ok {
+			release = r
+		}
+		if release != nil {
 			overrides = append(overrides, release)
 		}
 	}
@@ -113,7 +131,7 @@ func libraryResolveDependencies(li *librariesindex.Index, reqName, reqVersion st
 	if len(deps) == 0 {
 		// Check if there is a problem with the first level deps
 		for _, directDep := range reqLibRelease.GetDependencies() {
-			if _, ok := li.Libraries[directDep.GetName()]; !ok {
+			if !li.HasLibrary(directDep.GetName()) {
 				err := errors.New(i18n.Tr("dependency '%s' is not available", directDep.GetName()))
 				return nil, &cmderrors.LibraryDependenciesResolutionFailedError{Cause: err}
 			}

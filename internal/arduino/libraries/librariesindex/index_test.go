@@ -16,31 +16,49 @@
 package librariesindex
 
 import (
-	json "encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/arduino/arduino-cli/internal/arduino/libraries"
 	"github.com/arduino/go-paths-helper"
-	easyjson "github.com/mailru/easyjson"
 	"github.com/stretchr/testify/require"
 	semver "go.bug.st/relaxed-semver"
 )
 
-func TestIndexer(t *testing.T) {
-	fail1, err := LoadIndex(paths.New("testdata/inexistent"))
-	require.Error(t, err)
-	require.Nil(t, fail1)
+func releaseStrings(releases []*Release) []string {
+	res := make([]string, len(releases))
+	for i, r := range releases {
+		res[i] = r.String()
+	}
+	return res
+}
 
-	fail2, err := LoadIndex(paths.New("testdata/invalid.json"))
+func TestIndexer(t *testing.T) {
+	// A missing index file is not an error at load time: it is streamed on
+	// demand, so it behaves as an empty index and queries return "not found".
+	missing, err := LoadIndex(paths.New("testdata/inexistent"))
+	require.NoError(t, err)
+	require.NotNil(t, missing)
+	_, err = missing.FindRelease("RTCZero", nil)
 	require.Error(t, err)
-	require.Nil(t, fail2)
+
+	// The same holds for an invalid/corrupted index file.
+	invalid, err := LoadIndex(paths.New("testdata/invalid.json"))
+	require.NoError(t, err)
+	require.NotNil(t, invalid)
+	_, err = invalid.FindRelease("RTCZero", nil)
+	require.Error(t, err)
 
 	index, err := LoadIndex(paths.New("testdata/library_index.json"))
 	require.NoError(t, err)
-	require.Equal(t, 4124, len(index.Libraries), "parsed libraries count")
 
-	alp := index.Libraries["Arduino Low Power"]
+	count := 0
+	for range index.Libraries() {
+		count++
+	}
+	require.Equal(t, 4124, count, "parsed libraries count")
+
+	alp := index.FindIndexedLibrary(&libraries.Library{Name: "Arduino Low Power"})
 	require.NotNil(t, alp)
 	require.Equal(t, 5, len(alp.Releases))
 	require.Equal(t, "Arduino Low Power@1.2.2", alp.Latest.String())
@@ -87,8 +105,8 @@ func TestIndexer(t *testing.T) {
 
 	resolve1 := index.ResolveDependencies(alp.Releases["1.2.1"], nil)
 	require.Len(t, resolve1, 2)
-	require.Contains(t, resolve1, alp.Releases["1.2.1"])
-	require.Contains(t, resolve1, rtc.Releases["1.6.0"])
+	require.Contains(t, releaseStrings(resolve1), "Arduino Low Power@1.2.1")
+	require.Contains(t, releaseStrings(resolve1), "RTCZero@1.6.0")
 
 	oauth010, err := index.FindRelease("Arduino_OAuth", semver.MustParse("0.1.0"))
 	require.NoError(t, err)
@@ -109,32 +127,75 @@ func TestIndexer(t *testing.T) {
 
 	resolve2 := index.ResolveDependencies(oauth010, nil)
 	require.Len(t, resolve2, 4)
-	require.Contains(t, resolve2, oauth010)
-	require.Contains(t, resolve2, eccx135)
-	require.Contains(t, resolve2, bear172)
-	require.Contains(t, resolve2, http040)
+	require.Contains(t, releaseStrings(resolve2), "Arduino_OAuth@0.1.0")
+	require.Contains(t, releaseStrings(resolve2), "ArduinoECCX08@1.3.5")
+	require.Contains(t, releaseStrings(resolve2), "ArduinoBearSSL@1.7.2")
+	require.Contains(t, releaseStrings(resolve2), "ArduinoHttpClient@0.4.0")
 }
 
-func BenchmarkIndexParsingStdJSON(b *testing.B) {
+func benchIndex(b *testing.B) *Index {
+	idx, err := LoadIndex(paths.New("testdata/library_index.json"))
+	require.NoError(b, err)
+	return idx
+}
+
+// BenchmarkScanIndexFile measures the raw streaming decode throughput of the
+// whole index file (bytes/sec via SetBytes).
+func BenchmarkScanIndexFile(b *testing.B) {
 	indexFile := paths.New("testdata/library_index.json")
 	buff, err := indexFile.ReadFile()
 	require.NoError(b, err)
 	b.SetBytes(int64(len(buff)))
+	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		var i indexJSON
-		err = json.Unmarshal(buff, &i)
-		require.NoError(b, err)
+		count := 0
+		for range scanIndexFile(indexFile) {
+			count++
+		}
+		_ = count
 	}
 }
 
-func BenchmarkIndexParsingEasyJSON(b *testing.B) {
-	indexFile := paths.New("testdata/library_index.json")
-	buff, err := indexFile.ReadFile()
-	require.NoError(b, err)
-	b.SetBytes(int64(len(buff)))
+// BenchmarkLibraries measures a full pass over every library (the `lib search`
+// path: one scan, one library assembled at a time).
+func BenchmarkLibraries(b *testing.B) {
+	idx := benchIndex(b)
+	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		var i indexJSON
-		err = easyjson.Unmarshal(buff, &i)
-		require.NoError(b, err)
+		count := 0
+		for range idx.Libraries() {
+			count++
+		}
+		_ = count
+	}
+}
+
+// BenchmarkFindRelease measures a single release lookup (one scan of the index).
+func BenchmarkFindRelease(b *testing.B) {
+	idx := benchIndex(b)
+	version := semver.MustParse("0.1.0")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if r, err := idx.FindRelease("Arduino_OAuth", version); err != nil || r == nil {
+			b.Fatal("release not found")
+		}
+	}
+}
+
+// BenchmarkResolveDependencies measures the transitive dependency resolution
+// (one index scan per dependency-tree level).
+func BenchmarkResolveDependencies(b *testing.B) {
+	idx := benchIndex(b)
+	target, err := idx.FindRelease("Arduino_OAuth", semver.MustParse("0.1.0"))
+	require.NoError(b, err)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if deps := idx.ResolveDependencies(target, nil); len(deps) != 4 {
+			b.Fatalf("expected 4 deps, got %d", len(deps))
+		}
 	}
 }
