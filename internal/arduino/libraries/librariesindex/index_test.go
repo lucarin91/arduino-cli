@@ -133,68 +133,31 @@ func TestIndexer(t *testing.T) {
 	require.Contains(t, releaseStrings(resolve2), "ArduinoHttpClient@0.4.0")
 }
 
-func benchIndex(b *testing.B) *Index {
-	idx, err := LoadIndex(paths.New("testdata/library_index.json"))
-	require.NoError(b, err)
-	return idx
-}
+// These benchmarks use only the public API that also exists on the master
+// (full-load) implementation, and include LoadIndex in the timed loop, so they
+// can be run unchanged on either implementation to compare one-shot
+// "load + query" behaviour (like a single CLI invocation).
 
-// BenchmarkScanIndexFile measures the raw streaming decode throughput of the
-// whole index file (bytes/sec via SetBytes).
-func BenchmarkScanIndexFile(b *testing.B) {
-	indexFile := paths.New("testdata/library_index.json")
-	buff, err := indexFile.ReadFile()
-	require.NoError(b, err)
-	b.SetBytes(int64(len(buff)))
+func BenchmarkLoadAndFindRelease(b *testing.B) {
+	f := paths.New("testdata/library_index.json")
+	v := semver.MustParse("0.1.0")
 	b.ReportAllocs()
-	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		count := 0
-		for range scanIndexFile(indexFile) {
-			count++
-		}
-		_ = count
-	}
-}
-
-// BenchmarkLibraries measures a full pass over every library (the `lib search`
-// path: one scan, one library assembled at a time).
-func BenchmarkLibraries(b *testing.B) {
-	idx := benchIndex(b)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		count := 0
-		for range idx.Libraries() {
-			count++
-		}
-		_ = count
-	}
-}
-
-// BenchmarkFindRelease measures a single release lookup (one scan of the index).
-func BenchmarkFindRelease(b *testing.B) {
-	idx := benchIndex(b)
-	version := semver.MustParse("0.1.0")
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if r, err := idx.FindRelease("Arduino_OAuth", version); err != nil || r == nil {
+		idx, _ := LoadIndex(f)
+		if r, _ := idx.FindRelease("Arduino_OAuth", v); r == nil {
 			b.Fatal("release not found")
 		}
 	}
 }
 
-// BenchmarkResolveDependencies measures the transitive dependency resolution
-// (one index scan per dependency-tree level).
-func BenchmarkResolveDependencies(b *testing.B) {
-	idx := benchIndex(b)
-	target, err := idx.FindRelease("Arduino_OAuth", semver.MustParse("0.1.0"))
-	require.NoError(b, err)
+func BenchmarkLoadAndResolve(b *testing.B) {
+	f := paths.New("testdata/library_index.json")
+	v := semver.MustParse("0.1.0")
 	b.ReportAllocs()
-	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if deps := idx.ResolveDependencies(target, nil); len(deps) != 4 {
+		idx, _ := LoadIndex(f)
+		r, _ := idx.FindRelease("Arduino_OAuth", v)
+		if deps := idx.ResolveDependencies(r, nil); len(deps) != 4 {
 			b.Fatalf("expected 4 deps, got %d", len(deps))
 		}
 	}
