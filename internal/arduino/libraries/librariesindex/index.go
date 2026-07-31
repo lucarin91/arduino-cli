@@ -267,60 +267,7 @@ func libraryUpdate(indexLib *Library, lib *libraries.Library) *Release {
 // An optional "override" releases may be passed if we want to exclude the same
 // libraries from the index (for example if we want to keep an installed library).
 func (idx *Index) ResolveDependencies(lib *Release, overrides []*Release) []*Release {
-	resolver := semver.NewResolver[*Release]()
-
-	// done tracks library names already handled (added to the resolver, or
-	// deliberately excluded); frontier holds the names to load in the next scan.
-	done := map[string]bool{}
-	frontier := map[string]bool{}
-	enqueueDeps := func(deps []*Dependency) {
-		for _, dep := range deps {
-			if name := dep.GetName(); !done[name] {
-				frontier[name] = true
-			}
-		}
-	}
-
-	// Overridden libraries are provided as-is and must not be taken from the
-	// index; mark them done so they are never scanned, but still follow their
-	// dependencies.
-	for _, override := range overrides {
-		resolver.AddRelease(override)
-		done[override.GetName()] = true
-	}
-	for _, override := range overrides {
-		enqueueDeps(override.Dependencies)
-	}
-
-	// Seed the resolver with the target library. Its releases are already
-	// loaded (the caller obtained `lib` via FindRelease).
-	if lib.Library != nil {
-		done[lib.Library.Name] = true
-		for _, release := range lib.Library.Releases {
-			resolver.AddRelease(release)
-			enqueueDeps(release.Dependencies)
-		}
-	}
-
-	// Collect the transitive dependency closure, scanning the index once per
-	// dependency-tree level. Only the libraries actually involved in the
-	// resolution are loaded into memory, instead of the whole index.
-	for len(frontier) > 0 {
-		wanted := frontier
-		frontier = map[string]bool{}
-		for name := range wanted {
-			done[name] = true
-		}
-		for _, indexLib := range idx.findLibraries(wanted) {
-			for _, release := range indexLib.Releases {
-				resolver.AddRelease(release)
-				enqueueDeps(release.Dependencies)
-			}
-		}
-	}
-
-	// Perform lib resolution
-	return resolver.Resolve(lib)
+	return idx.newDependencyResolver(overrides).Resolve(lib)
 }
 
 // Versions returns an array of all versions available of the library
