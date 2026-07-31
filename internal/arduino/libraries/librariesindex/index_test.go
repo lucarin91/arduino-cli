@@ -17,7 +17,9 @@ package librariesindex
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/arduino/arduino-cli/internal/arduino/libraries"
 	"github.com/arduino/go-paths-helper"
@@ -138,27 +140,73 @@ func TestIndexer(t *testing.T) {
 // can be run unchanged on either implementation to compare one-shot
 // "load + query" behaviour (like a single CLI invocation).
 
-func BenchmarkLoadAndFindRelease(b *testing.B) {
-	f := paths.New("testdata/library_index.json")
-	v := semver.MustParse("0.1.0")
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		idx, _ := LoadIndex(f)
-		if r, _ := idx.FindRelease("Arduino_OAuth", v); r == nil {
-			b.Fatal("release not found")
+func benchLoadAndFindRelease(tb testing.TB) {
+	idx, _ := LoadIndex(paths.New("testdata/library_index.json"))
+	if r, _ := idx.FindRelease("Arduino_OAuth", semver.MustParse("0.1.0")); r == nil {
+		tb.Fatal("release not found")
+	}
+}
+
+func benchLoadAndResolve(tb testing.TB) {
+	idx, _ := LoadIndex(paths.New("testdata/library_index.json"))
+	r, _ := idx.FindRelease("Arduino_OAuth", semver.MustParse("0.1.0"))
+	if deps := idx.ResolveDependencies(r, nil); len(deps) != 4 {
+		tb.Fatalf("expected 4 deps, got %d", len(deps))
+	}
+}
+
+// reportPeakMemory runs fn b.N times while sampling the live heap, and reports
+// the peak HeapInuse as a "peakMem-MiB" metric. It uses runtime.ReadMemStats
+// (portable, unlike ru_maxrss) so it can live alongside the cross-platform
+// tests. ReadMemStats stops the world, so treat the memory metric as the truth
+// here and read timings from the plain benchmarks.
+func reportPeakMemory(b *testing.B, fn func()) {
+	var peak uint64
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		var m runtime.MemStats
+		t := time.NewTicker(time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if runtime.ReadMemStats(&m); m.HeapInuse > peak {
+					peak = m.HeapInuse
+				}
+			}
 		}
+	}()
+	b.ResetTimer()
+	for range b.N {
+		fn()
+	}
+	b.StopTimer()
+	close(stop)
+	<-done
+	b.ReportMetric(float64(peak)/(1<<20), "peakMem-MiB")
+}
+
+func BenchmarkLoadAndFindRelease(b *testing.B) {
+	b.ReportAllocs()
+	for range b.N {
+		benchLoadAndFindRelease(b)
 	}
 }
 
 func BenchmarkLoadAndResolve(b *testing.B) {
-	f := paths.New("testdata/library_index.json")
-	v := semver.MustParse("0.1.0")
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		idx, _ := LoadIndex(f)
-		r, _ := idx.FindRelease("Arduino_OAuth", v)
-		if deps := idx.ResolveDependencies(r, nil); len(deps) != 4 {
-			b.Fatalf("expected 4 deps, got %d", len(deps))
-		}
+	for range b.N {
+		benchLoadAndResolve(b)
 	}
+}
+
+func BenchmarkLoadAndFindReleaseMem(b *testing.B) {
+	reportPeakMemory(b, func() { benchLoadAndFindRelease(b) })
+}
+
+func BenchmarkLoadAndResolveMem(b *testing.B) {
+	reportPeakMemory(b, func() { benchLoadAndResolve(b) })
 }
