@@ -123,6 +123,15 @@ func (r *Release) String() string {
 	return r.Library.Name + "@" + r.Version.String()
 }
 
+// AsReleaseReference converts this release into a ReleaseReference, which is a stripped-down version of Release used for dependency resolution.
+func (r *Release) AsReleaseReference() *ReleaseReference {
+	return &ReleaseReference{
+		name:         r.GetName(),
+		version:      r.GetVersion(),
+		dependencies: r.GetDependencies(),
+	}
+}
+
 // releases streams the releases in the backing index file. It yields nothing on
 // an empty index.
 func (idx *Index) releases() iter.Seq[*indexRelease] {
@@ -262,12 +271,88 @@ func libraryUpdate(indexLib *Library, lib *libraries.Library) *Release {
 	return nil
 }
 
+// ReleaseReference is a stripped-down version of Release, used for dependency resolution.
+// It implements the semver.Release interface, but does not include the large descriptive fields
+// of a full Release.
+type ReleaseReference struct {
+	name         string
+	version      *semver.Version
+	dependencies []*Dependency
+}
+
+func (rel *ReleaseReference) GetDependencies() []*Dependency {
+	return rel.dependencies
+}
+
+func (rel *ReleaseReference) GetName() string {
+	return rel.name
+}
+
+func (rel *ReleaseReference) GetVersion() *semver.Version {
+	return rel.version
+}
+
+func (rel *ReleaseReference) String() string {
+	return rel.name + "@" + rel.version.String()
+}
+
+// ReleaseReferenceCompare compares two library releases reference by name, or by version if the names are equal.
+func ReleaseReferenceCompare(r1, r2 *ReleaseReference) int {
+	if cmp := strings.Compare(r1.GetName(), r2.GetName()); cmp != 0 {
+		return cmp
+	}
+	return r1.GetVersion().CompareTo(r2.GetVersion())
+}
+
 // ResolveDependencies resolve the dependencies of a library release and returns a
 // possible solution (the set of library releases to install together with the library).
 // An optional "override" releases may be passed if we want to exclude the same
 // libraries from the index (for example if we want to keep an installed library).
-func (idx *Index) ResolveDependencies(lib *Release, overrides []*Release) []*Release {
-	return idx.newDependencyResolver(overrides).Resolve(lib)
+func (idx *Index) ResolveDependencies(lib *Release, overrides []*Release) []*ReleaseReference {
+	resolver := semver.NewResolver[*ReleaseReference]()
+
+	overridden := map[string]bool{}
+	for _, override := range overrides {
+		resolver.AddRelease(&ReleaseReference{
+			name:         override.GetName(),
+			version:      override.GetVersion(),
+			dependencies: override.GetDependencies(),
+		})
+		overridden[override.GetName()] = true
+	}
+
+	// Create and populate the library resolver
+	for indexLib := range idx.releases() {
+		if _, ok := overridden[indexLib.Name]; ok {
+			continue
+		}
+		resolver.AddRelease(&ReleaseReference{
+			name:         indexLib.Name,
+			version:      indexLib.Version,
+			dependencies: indexLib.extractDependencies(),
+		})
+	}
+
+	// Perform lib resolution
+	return resolver.Resolve(&ReleaseReference{
+		name:         lib.GetName(),
+		version:      lib.GetVersion(),
+		dependencies: lib.GetDependencies(),
+	})
+}
+
+// ResolveReleaseReferences maps an array of ReleaseReference to their corresponding full Release objects in the index.
+func (idx *Index) ResolveReleaseReferences(solution []*ReleaseReference) []*Release {
+	names := map[string]bool{}
+	for _, rel := range solution {
+		names[rel.GetName()] = true
+	}
+	solutionLibs := idx.findLibraries(names)
+	solutionReleases := make([]*Release, len(solution))
+	for i, rel := range solution {
+		solutionReleases[i] = solutionLibs[rel.GetName()].Releases[rel.GetVersion().NormalizedString()]
+	}
+	return solutionReleases
 }
 
 // Versions returns an array of all versions available of the library

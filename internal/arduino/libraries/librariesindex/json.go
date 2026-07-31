@@ -22,7 +22,6 @@ import (
 	"github.com/arduino/arduino-cli/internal/arduino/resources"
 	"github.com/arduino/go-paths-helper"
 	json "github.com/goccy/go-json"
-	"go.bug.st/f"
 	semver "go.bug.st/relaxed-semver"
 )
 
@@ -49,75 +48,6 @@ type indexRelease struct {
 type indexDependency struct {
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
-}
-
-// indexReleaseLite is a light projection of indexRelease with only the fields
-// the dependency resolver and installer need. Decoding it skips the large
-// descriptive fields, so resolving over the whole index stays cheap.
-type indexReleaseLite struct {
-	Name            string             `json:"name"`
-	Version         *semver.Version    `json:"version"`
-	Dependencies    []*indexDependency `json:"dependencies,omitempty"`
-	URL             string             `json:"url"`
-	ArchiveFileName string             `json:"archiveFileName"`
-	Size            int64              `json:"size"`
-	Checksum        string             `json:"checksum"`
-}
-
-// newDependencyResolver streams the index into a semver resolver, adding a
-// light release for every library. The given overrides are used as-is instead
-// of the index versions of the same libraries.
-func (idx *Index) newDependencyResolver(overrides []*Release) *semver.Resolver[*Release, *Dependency] {
-	resolver := semver.NewResolver[*Release]()
-
-	overridden := map[string]bool{}
-	for _, override := range overrides {
-		resolver.AddRelease(override)
-		overridden[override.GetName()] = true
-	}
-
-	if idx == nil || idx.indexFile == nil {
-		return resolver
-	}
-	file, err := idx.indexFile.Open()
-	if err != nil {
-		return resolver
-	}
-	defer file.Close()
-
-	dec := json.NewDecoder(bufio.NewReaderSize(file, 1024*1024))
-	// Skip to inside the "libraries" array: '{', "libraries", '['.
-	for range 3 {
-		if _, err := dec.Token(); err != nil {
-			return resolver
-		}
-	}
-	for dec.More() {
-		var r indexReleaseLite
-		if dec.Decode(&r) != nil {
-			break
-		}
-		if !overridden[r.Name] {
-			resolver.AddRelease(r.toRelease())
-		}
-	}
-	return resolver
-}
-
-// toRelease builds a *Release with the fields the resolver and installer need.
-func (lite *indexReleaseLite) toRelease() *Release {
-	return &Release{
-		Version:      lite.Version,
-		Dependencies: f.Map(lite.Dependencies, (*indexDependency).extractDependency),
-		Resource: &resources.DownloadResource{
-			URL:             lite.URL,
-			ArchiveFileName: lite.ArchiveFileName,
-			Size:            lite.Size,
-			Checksum:        lite.Checksum,
-			CachePath:       "libraries",
-		},
-		Library: &Library{Name: lite.Name},
-	}
 }
 
 // LoadIndex creates an Index backed by the given library_index.json file.

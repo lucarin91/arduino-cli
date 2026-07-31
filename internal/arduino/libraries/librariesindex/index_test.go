@@ -27,7 +27,7 @@ import (
 	semver "go.bug.st/relaxed-semver"
 )
 
-func releaseStrings(releases []*Release) []string {
+func releaseStrings(releases []*ReleaseReference) []string {
 	res := make([]string, len(releases))
 	for i, r := range releases {
 		res[i] = r.String()

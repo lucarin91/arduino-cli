@@ -112,7 +112,7 @@ func librariesGetAllInstalled(lme *librariesmanager.Explorer, li *librariesindex
 	return overrides
 }
 
-func libraryResolveDependencies(li *librariesindex.Index, reqName, reqVersion string, overrides []*librariesindex.Release) ([]*librariesindex.Release, error) {
+func libraryResolveDependencies(li *librariesindex.Index, reqName, reqVersion string, overrides []*librariesindex.Release) ([]*librariesindex.ReleaseReference, error) {
 	version, err := parseVersion(reqVersion)
 	if err != nil {
 		return nil, err
