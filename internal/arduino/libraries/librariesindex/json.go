@@ -17,6 +17,7 @@ package librariesindex
 
 import (
 	"bufio"
+	"fmt"
 	"iter"
 
 	"github.com/arduino/arduino-cli/internal/arduino/resources"
@@ -54,6 +55,9 @@ type indexDependency struct {
 // The file is not read here: it is streamed on demand by the Index methods, so
 // that the whole (potentially very large) index is never held in memory.
 func LoadIndex(indexFile *paths.Path) (*Index, error) {
+	if !indexFile.Exist() {
+		return nil, fmt.Errorf("index file not found: %s", indexFile)
+	}
 	return &Index{indexFile: indexFile}, nil
 }
 

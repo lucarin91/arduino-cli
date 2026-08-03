@@ -36,13 +36,10 @@ func releaseStrings(releases []*ReleaseReference) []string {
 }
 
 func TestIndexer(t *testing.T) {
-	// A missing index file is not an error at load time: it is streamed on
-	// demand, so it behaves as an empty index and queries return "not found".
+	// A missing index file is an error at load time.
 	missing, err := LoadIndex(paths.New("testdata/inexistent"))
-	require.NoError(t, err)
-	require.NotNil(t, missing)
-	_, err = missing.FindRelease("RTCZero", nil)
 	require.Error(t, err)
+	require.Nil(t, missing)
 
 	// The same holds for an invalid/corrupted index file.
 	invalid, err := LoadIndex(paths.New("testdata/invalid.json"))
