@@ -231,44 +231,28 @@ func (idx *Index) FindIndexedLibrary(lib *libraries.Library) *Library {
 	return idx.findLibrary(lib.Name)
 }
 
-// FindLibraryUpdate check if an installed library may be updated using
-// one of the indexed libraries. This function returns the Release to install
-// to update the library if found, otherwise nil is returned.
-func (idx *Index) FindLibraryUpdate(lib *libraries.Library) *Release {
-	return libraryUpdate(idx.FindIndexedLibrary(lib), lib)
-}
-
-// FindLibraryUpdates checks, for each of the given installed libraries, whether
-// an update is available in the index. The lookup is performed in a single scan
-// of the index file. The returned map is keyed by the installed library and
-// only contains entries for libraries that have an available update.
-func (idx *Index) FindLibraryUpdates(libs []*libraries.Library) map[*libraries.Library]*Release {
+// FindLibraryUpdates maps each of the given installed libraries to an update
+// if this is available in the index, or to nil otherwise.
+// The lookup is performed for all libraries in a single scan of the index file.
+func (idx *Index) FindLibraryUpdates(libs ...*libraries.Library) []*Release {
 	names := make([]string, len(libs))
 	for i, lib := range libs {
 		names[i] = lib.Name
 	}
 	indexed := idx.FindIndexedLibraries(names)
-	updates := map[*libraries.Library]*Release{}
+	updates := []*Release{}
 	for _, lib := range libs {
-		if update := libraryUpdate(indexed[lib.Name], lib); update != nil {
-			updates[lib] = update
+		var update *Release
+		if indexLib := indexed[lib.Name]; indexLib != nil {
+			// If a library.properties has an invalid version property, usually empty or malformed,
+			// the latest available version is returned
+			if lib.Version == nil || indexLib.Latest.Version.GreaterThan(lib.Version) {
+				update = indexLib.Latest
+			}
 		}
+		updates = append(updates, update)
 	}
 	return updates
-}
-
-// libraryUpdate returns the release to update `lib` to, given its indexed
-// counterpart `indexLib` (possibly nil), or nil if no update is available.
-func libraryUpdate(indexLib *Library, lib *libraries.Library) *Release {
-	if indexLib == nil {
-		return nil
-	}
-	// If a library.properties has an invalid version property, usually empty or malformed,
-	// the latest available version is returned
-	if lib.Version == nil || indexLib.Latest.Version.GreaterThan(lib.Version) {
-		return indexLib.Latest
-	}
-	return nil
 }
 
 // ReleaseReference is a stripped-down version of Release, used for dependency resolution.
