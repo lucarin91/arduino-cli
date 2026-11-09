@@ -39,9 +39,10 @@ import (
 var DebugPreprocessor bool
 
 // PreprocessSketchWithCtags performs preprocessing of the arduino sketch using CTags.
+// gccPreprocessedFile, if not nil, is the sketch already run through the GCC preprocessor, and that run is skipped.
 func PreprocessSketchWithCtags(
 	ctx context.Context,
-	unpreprocessedSourceFile, preprocessedSourceFile *paths.Path,
+	unpreprocessedSourceFile, preprocessedSourceFile, gccPreprocessedFile *paths.Path,
 	sketch *sketch.Sketch, includes paths.PathList,
 	lineOffset int, buildProperties *properties.Map,
 	onlyUpdateCompilationDatabase, verbose bool,
@@ -55,9 +56,15 @@ func PreprocessSketchWithCtags(
 	}
 	defer tmpDir.RemoveAll()
 
-	// Run GCC preprocessor
+	// Run GCC preprocessor, unless the library discovery already did it
 	ctagsTarget := tmpDir.Join("sketch_merged.cpp")
-	result := GCC(unpreprocessedSourceFile, ctagsTarget, includes, buildProperties, nil).Run(ctx)
+	gccOutput := ctagsTarget
+	result := &runner.Result{}
+	if gccPreprocessedFile != nil {
+		gccOutput = gccPreprocessedFile
+	} else {
+		result = GCC(unpreprocessedSourceFile, ctagsTarget, includes, buildProperties, nil).Run(ctx)
+	}
 	stdout.Write(result.Stdout)
 	stderr.Write(result.Stderr)
 	if err := result.Error; err != nil {
@@ -74,7 +81,7 @@ func PreprocessSketchWithCtags(
 		}
 	}
 
-	if src, err := ctagsTarget.ReadFile(); err == nil {
+	if src, err := gccOutput.ReadFile(); err == nil {
 		filteredSource := filterSketchSource(sketch, bytes.NewReader(src), false, stderr)
 		if err := ctagsTarget.WriteFile([]byte(filteredSource)); err != nil {
 			return &runner.Result{Args: result.Args, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}, err
